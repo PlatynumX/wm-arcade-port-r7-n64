@@ -58,3 +58,8 @@ make -j2
 ```
 
 Output: `wm_arcade_r7.z64`
+
+
+## r7h1 controller hotfix
+
+Real-hardware testing showed that P1 B never incremented the r7 HUD counter. r7h1 preserves strict B on native N64-style devices, but when libdragon reports `JOYPAD_STYLE_GCN`, B/X/Y rising edges are accepted as the N64 B/kick compatibility action. The HUD separately counts B, X, Y, and resulting kick edges and displays the managed raw 16-bit button word. Native N64-style devices additionally get a throttled synchronous raw sample using `joypad_read_n64_inputs()`.

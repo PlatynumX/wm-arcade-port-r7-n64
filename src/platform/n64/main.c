@@ -20,6 +20,12 @@
 static joypad_buttons_t g_prev_buttons;
 static unsigned g_pad_a_edges;
 static unsigned g_pad_b_edges;
+static unsigned g_pad_x_edges;
+static unsigned g_pad_y_edges;
+static unsigned g_pad_kick_edges;
+static uint16_t g_managed_raw;
+static uint16_t g_sync_raw;
+static joypad_style_t g_pad_style;
 
 static wm_input_state read_input(bool *connected) {
     wm_input_state out = {0};
@@ -32,12 +38,31 @@ static wm_input_state read_input(bool *connected) {
 
     const joypad_inputs_t in = joypad_get_inputs(JOYPAD_PORT_1);
     const joypad_buttons_t now = joypad_get_buttons(JOYPAD_PORT_1);
+    g_pad_style = joypad_get_style(JOYPAD_PORT_1);
+    g_managed_raw = now.raw;
 
-    /* Do our own rising-edge latch from the raw/current state.  A worked on
-       hardware while B did not, despite the portable B->kick path testing
-       cleanly; this removes joypad_get_buttons_pressed() from that equation. */
+    /* For a true N64-style device, also sample the controller synchronously
+       every eighth frame. This bypasses the managed poll path and gives the
+       HUD a second raw Joybus sample without paying the blocking cost every
+       frame. joypad_read_n64_inputs() is specifically an N64-controller read,
+       so do not issue it to GameCube-style devices. */
+    static unsigned sync_divider;
+    if (g_pad_style == JOYPAD_STYLE_N64 && ((sync_divider++ & 7u) == 0u)) {
+        g_sync_raw = joypad_read_n64_inputs(JOYPAD_PORT_1).btn.raw;
+    } else if (g_pad_style != JOYPAD_STYLE_N64) {
+        g_sync_raw = 0;
+    }
+
+    /* Do our own rising-edge latch from current state. On GameCube-style
+       devices, keep the actual B/X/Y bits visible and accept any of those
+       face-button edges as the N64 B/kick compatibility action. This is
+       intentionally scoped to JOYPAD_STYLE_GCN; native N64 pads stay B-only. */
     const bool a_edge = now.a && !g_prev_buttons.a;
     const bool b_edge = now.b && !g_prev_buttons.b;
+    const bool x_edge = now.x && !g_prev_buttons.x;
+    const bool y_edge = now.y && !g_prev_buttons.y;
+    const bool kick_edge = b_edge ||
+        (g_pad_style == JOYPAD_STYLE_GCN && (x_edge || y_edge));
 
     out.stick_x = in.stick_x;
     out.stick_y = in.stick_y;
@@ -50,7 +75,7 @@ static wm_input_state read_input(bool *connected) {
     }
 
     out.a = a_edge;
-    out.b = b_edge;
+    out.b = kick_edge;
     out.z = now.z;
     out.start = now.start && !g_prev_buttons.start;
     out.l = now.l && !g_prev_buttons.l;
@@ -62,6 +87,9 @@ static wm_input_state read_input(bool *connected) {
 
     if (a_edge) ++g_pad_a_edges;
     if (b_edge) ++g_pad_b_edges;
+    if (x_edge) ++g_pad_x_edges;
+    if (y_edge) ++g_pad_y_edges;
+    if (kick_edge) ++g_pad_kick_edges;
     g_prev_buttons = now;
     return out;
 }
@@ -236,9 +264,15 @@ static void draw_match_hud(const wm_demo *demo) {
     if (p1spr) {
         int a2x = p1spr->wimp_tail[WM_ATTACH_X_SLOT];
         int a2y = p1spr->wimp_tail[WM_ATTACH_Y_SLOT];
-        snprintf(line, sizeof(line), "PAD A:%u B:%u  A2:+38/+40 v:%d,%d",
-                 g_pad_a_edges, g_pad_b_edges, a2x, a2y);
+        const char *style = g_pad_style == JOYPAD_STYLE_GCN ? "GC" :
+                            g_pad_style == JOYPAD_STYLE_N64 ? "N64" : "OTHER";
+        snprintf(line, sizeof(line), "PAD A:%u B:%u X:%u Y:%u K:%u %s",
+                 g_pad_a_edges, g_pad_b_edges, g_pad_x_edges, g_pad_y_edges,
+                 g_pad_kick_edges, style);
         rdpq_text_print(NULL, 1, 8, 57, line);
+        snprintf(line, sizeof(line), "RAW M:%04X S:%04X  A2:%d,%d",
+                 (unsigned)g_managed_raw, (unsigned)g_sync_raw, a2x, a2y);
+        rdpq_text_print(NULL, 1, 8, 214, line);
     }
 }
 
@@ -295,7 +329,7 @@ int main(void) {
     rdpq_text_register_font(1, rdpq_font_load_builtin(FONT_BUILTIN_DEBUG_VAR));
 
     wm_demo_init(&demo);
-    debugf("wm_arcade_port r7: locked attachment + hardware B-edge input\n");
+    debugf("wm_arcade_port r7h1: GC-face compatibility + raw input diagnostics\n");
     debugf("embedded source sprites: %u\n", (unsigned)wm_bret_sprite_count());
 
     while (1) {
