@@ -24,7 +24,8 @@ static unsigned g_pad_x_edges;
 static unsigned g_pad_y_edges;
 static unsigned g_pad_kick_edges;
 static uint16_t g_managed_raw;
-static uint16_t g_sync_raw;
+static uint16_t g_last_edge_raw;
+static joybus_identifier_t g_pad_identifier;
 static joypad_style_t g_pad_style;
 
 static wm_input_state read_input(bool *connected) {
@@ -41,17 +42,11 @@ static wm_input_state read_input(bool *connected) {
     g_pad_style = joypad_get_style(JOYPAD_PORT_1);
     g_managed_raw = now.raw;
 
-    /* For a true N64-style device, also sample the controller synchronously
-       every eighth frame. This bypasses the managed poll path and gives the
-       HUD a second raw Joybus sample without paying the blocking cost every
-       frame. joypad_read_n64_inputs() is specifically an N64-controller read,
-       so do not issue it to GameCube-style devices. */
-    static unsigned sync_divider;
-    if (g_pad_style == JOYPAD_STYLE_N64 && ((sync_divider++ & 7u) == 0u)) {
-        g_sync_raw = joypad_read_n64_inputs(JOYPAD_PORT_1).btn.raw;
-    } else if (g_pad_style != JOYPAD_STYLE_N64) {
-        g_sync_raw = 0;
-    }
+    /* r7h1a: use only public APIs from the pinned libdragon Joypad API.
+       Keep the complete managed raw word plus the newest rising-edge mask;
+       that is enough to discover which logical bit physical B arrives on. */
+    g_pad_identifier = joypad_get_identifier(JOYPAD_PORT_1);
+    g_last_edge_raw = (uint16_t)(now.raw & (uint16_t)~g_prev_buttons.raw);
 
     /* Do our own rising-edge latch from current state. On GameCube-style
        devices, keep the actual B/X/Y bits visible and accept any of those
@@ -61,8 +56,11 @@ static wm_input_state read_input(bool *connected) {
     const bool b_edge = now.b && !g_prev_buttons.b;
     const bool x_edge = now.x && !g_prev_buttons.x;
     const bool y_edge = now.y && !g_prev_buttons.y;
-    const bool kick_edge = b_edge ||
-        (g_pad_style == JOYPAD_STYLE_GCN && (x_edge || y_edge));
+    const bool c_face_edge = (now.c_down && !g_prev_buttons.c_down) ||
+                             (now.c_left && !g_prev_buttons.c_left) ||
+                             (now.c_right && !g_prev_buttons.c_right);
+    const bool kick_edge = b_edge || x_edge || y_edge ||
+        (g_pad_style == JOYPAD_STYLE_N64 && c_face_edge);
 
     out.stick_x = in.stick_x;
     out.stick_y = in.stick_y;
@@ -266,12 +264,12 @@ static void draw_match_hud(const wm_demo *demo) {
         int a2y = p1spr->wimp_tail[WM_ATTACH_Y_SLOT];
         const char *style = g_pad_style == JOYPAD_STYLE_GCN ? "GC" :
                             g_pad_style == JOYPAD_STYLE_N64 ? "N64" : "OTHER";
-        snprintf(line, sizeof(line), "PAD A:%u B:%u X:%u Y:%u K:%u %s",
+        snprintf(line, sizeof(line), "PAD A:%u B:%u X:%u Y:%u K:%u %s ID:%04X",
                  g_pad_a_edges, g_pad_b_edges, g_pad_x_edges, g_pad_y_edges,
-                 g_pad_kick_edges, style);
+                 g_pad_kick_edges, style, (unsigned)g_pad_identifier);
         rdpq_text_print(NULL, 1, 8, 57, line);
-        snprintf(line, sizeof(line), "RAW M:%04X S:%04X  A2:%d,%d",
-                 (unsigned)g_managed_raw, (unsigned)g_sync_raw, a2x, a2y);
+        snprintf(line, sizeof(line), "RAW M:%04X E:%04X  A2:%d,%d",
+                 (unsigned)g_managed_raw, (unsigned)g_last_edge_raw, a2x, a2y);
         rdpq_text_print(NULL, 1, 8, 214, line);
     }
 }
@@ -329,7 +327,7 @@ int main(void) {
     rdpq_text_register_font(1, rdpq_font_load_builtin(FONT_BUILTIN_DEBUG_VAR));
 
     wm_demo_init(&demo);
-    debugf("wm_arcade_port r7h1: GC-face compatibility + raw input diagnostics\n");
+    debugf("wm_arcade_port r7h1a: GC-face compatibility + raw input diagnostics\n");
     debugf("embedded source sprites: %u\n", (unsigned)wm_bret_sprite_count());
 
     while (1) {
