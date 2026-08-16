@@ -25,8 +25,47 @@ static unsigned g_pad_y_edges;
 static unsigned g_pad_kick_edges;
 static uint16_t g_managed_raw;
 static uint16_t g_last_edge_raw;
+static uint16_t g_wire_raw;
+static uint16_t g_wire_edge_raw;
+static unsigned g_wire_b_edges;
 static joybus_identifier_t g_pad_identifier;
 static joypad_style_t g_pad_style;
+
+/* r7h2: bypass Joypad normalization for one hardware diagnostic.
+   Command 0x01 is the native N64 "read controller state" Joybus command.
+   Response: buttons_hi, buttons_lo, stick_x, stick_y. */
+#define N64_BTN_A       0x8000u
+#define N64_BTN_B       0x4000u
+#define N64_BTN_Z       0x2000u
+#define N64_BTN_START   0x1000u
+#define N64_BTN_D_UP    0x0800u
+#define N64_BTN_D_DOWN  0x0400u
+#define N64_BTN_D_LEFT  0x0200u
+#define N64_BTN_D_RIGHT 0x0100u
+#define N64_BTN_L       0x0020u
+#define N64_BTN_R       0x0010u
+#define N64_BTN_C_UP    0x0008u
+#define N64_BTN_C_DOWN  0x0004u
+#define N64_BTN_C_LEFT  0x0002u
+#define N64_BTN_C_RIGHT 0x0001u
+
+typedef struct wm_wire_pad_s {
+    uint16_t buttons;
+    int8_t stick_x;
+    int8_t stick_y;
+} wm_wire_pad;
+
+static wm_wire_pad read_n64_wire_pad(void) {
+    const uint8_t cmd = 0x01;
+    uint8_t reply[4] = {0, 0, 0, 0};
+    joybus_exec_cmd(0, 1, 4, &cmd, reply);
+    wm_wire_pad out = {
+        .buttons = (uint16_t)(((uint16_t)reply[0] << 8) | reply[1]),
+        .stick_x = (int8_t)reply[2],
+        .stick_y = (int8_t)reply[3],
+    };
+    return out;
+}
 
 static wm_input_state read_input(bool *connected) {
     wm_input_state out = {0};
@@ -34,61 +73,59 @@ static wm_input_state read_input(bool *connected) {
     *connected = joypad_is_connected(JOYPAD_PORT_1);
     if (!*connected) {
         g_prev_buttons.raw = 0;
+        g_wire_raw = 0;
+        g_wire_edge_raw = 0;
         return out;
     }
 
-    const joypad_inputs_t in = joypad_get_inputs(JOYPAD_PORT_1);
-    const joypad_buttons_t now = joypad_get_buttons(JOYPAD_PORT_1);
+    /* Keep libdragon's managed values on-screen for comparison, but drive
+       gameplay from the native controller response in this diagnostic. */
+    const joypad_buttons_t managed = joypad_get_buttons(JOYPAD_PORT_1);
     g_pad_style = joypad_get_style(JOYPAD_PORT_1);
-    g_managed_raw = now.raw;
-
-    /* r7h1a: use only public APIs from the pinned libdragon Joypad API.
-       Keep the complete managed raw word plus the newest rising-edge mask;
-       that is enough to discover which logical bit physical B arrives on. */
     g_pad_identifier = joypad_get_identifier(JOYPAD_PORT_1);
-    g_last_edge_raw = (uint16_t)(now.raw & (uint16_t)~g_prev_buttons.raw);
+    g_managed_raw = managed.raw;
+    g_last_edge_raw = (uint16_t)(managed.raw & (uint16_t)~g_prev_buttons.raw);
 
-    /* Do our own rising-edge latch from current state. On GameCube-style
-       devices, keep the actual B/X/Y bits visible and accept any of those
-       face-button edges as the N64 B/kick compatibility action. This is
-       intentionally scoped to JOYPAD_STYLE_GCN; native N64 pads stay B-only. */
-    const bool a_edge = now.a && !g_prev_buttons.a;
-    const bool b_edge = now.b && !g_prev_buttons.b;
-    const bool x_edge = now.x && !g_prev_buttons.x;
-    const bool y_edge = now.y && !g_prev_buttons.y;
-    const bool c_face_edge = (now.c_down && !g_prev_buttons.c_down) ||
-                             (now.c_left && !g_prev_buttons.c_left) ||
-                             (now.c_right && !g_prev_buttons.c_right);
-    const bool kick_edge = b_edge || x_edge || y_edge ||
-        (g_pad_style == JOYPAD_STYLE_N64 && c_face_edge);
+    static uint16_t prev_wire_raw;
+    const wm_wire_pad wire = read_n64_wire_pad();
+    g_wire_raw = wire.buttons;
+    g_wire_edge_raw = (uint16_t)(wire.buttons & (uint16_t)~prev_wire_raw);
 
-    out.stick_x = in.stick_x;
-    out.stick_y = in.stick_y;
+    const bool a_edge = (g_wire_edge_raw & N64_BTN_A) != 0;
+    const bool b_edge = (g_wire_edge_raw & N64_BTN_B) != 0;
+    if (a_edge) ++g_pad_a_edges;
+    if (b_edge) {
+        ++g_pad_b_edges;
+        ++g_pad_kick_edges;
+        ++g_wire_b_edges;
+    }
+
+    out.stick_x = wire.stick_x;
+    out.stick_y = wire.stick_y;
     if (out.stick_x >= -STICK_DEADZONE && out.stick_x <= STICK_DEADZONE &&
         out.stick_y >= -STICK_DEADZONE && out.stick_y <= STICK_DEADZONE) {
-        if (now.d_left)  out.stick_x = -90;
-        if (now.d_right) out.stick_x =  90;
-        if (now.d_down)  out.stick_y = -90;
-        if (now.d_up)    out.stick_y =  90;
+        if (wire.buttons & N64_BTN_D_LEFT)  out.stick_x = -90;
+        if (wire.buttons & N64_BTN_D_RIGHT) out.stick_x = 90;
+        if (wire.buttons & N64_BTN_D_DOWN)  out.stick_y = -90;
+        if (wire.buttons & N64_BTN_D_UP)    out.stick_y = 90;
     }
 
     out.a = a_edge;
-    out.b = kick_edge;
-    out.z = now.z;
-    out.start = now.start && !g_prev_buttons.start;
-    out.l = now.l && !g_prev_buttons.l;
-    out.r = now.r && !g_prev_buttons.r;
-    out.c_up = now.c_up && !g_prev_buttons.c_up;
-    out.c_down = now.c_down && !g_prev_buttons.c_down;
-    out.c_left = now.c_left && !g_prev_buttons.c_left;
-    out.c_right = now.c_right && !g_prev_buttons.c_right;
+    out.b = b_edge;
+    out.z = (wire.buttons & N64_BTN_Z) != 0;
+    out.start = (g_wire_edge_raw & N64_BTN_START) != 0;
+    out.l = (g_wire_edge_raw & N64_BTN_L) != 0;
+    out.r = (g_wire_edge_raw & N64_BTN_R) != 0;
+    out.c_up = (g_wire_edge_raw & N64_BTN_C_UP) != 0;
+    out.c_down = (g_wire_edge_raw & N64_BTN_C_DOWN) != 0;
+    out.c_left = (g_wire_edge_raw & N64_BTN_C_LEFT) != 0;
+    out.c_right = (g_wire_edge_raw & N64_BTN_C_RIGHT) != 0;
 
-    if (a_edge) ++g_pad_a_edges;
-    if (b_edge) ++g_pad_b_edges;
-    if (x_edge) ++g_pad_x_edges;
-    if (y_edge) ++g_pad_y_edges;
-    if (kick_edge) ++g_pad_kick_edges;
-    g_prev_buttons = now;
+    if (managed.x && !g_prev_buttons.x) ++g_pad_x_edges;
+    if (managed.y && !g_prev_buttons.y) ++g_pad_y_edges;
+
+    prev_wire_raw = wire.buttons;
+    g_prev_buttons = managed;
     return out;
 }
 
@@ -268,8 +305,9 @@ static void draw_match_hud(const wm_demo *demo) {
                  g_pad_a_edges, g_pad_b_edges, g_pad_x_edges, g_pad_y_edges,
                  g_pad_kick_edges, style, (unsigned)g_pad_identifier);
         rdpq_text_print(NULL, 1, 8, 57, line);
-        snprintf(line, sizeof(line), "RAW M:%04X E:%04X  A2:%d,%d",
-                 (unsigned)g_managed_raw, (unsigned)g_last_edge_raw, a2x, a2y);
+        snprintf(line, sizeof(line), "M:%04X/%04X W:%04X E:%04X WB:%u",
+                 (unsigned)g_managed_raw, (unsigned)g_last_edge_raw,
+                 (unsigned)g_wire_raw, (unsigned)g_wire_edge_raw, g_wire_b_edges);
         rdpq_text_print(NULL, 1, 8, 214, line);
     }
 }

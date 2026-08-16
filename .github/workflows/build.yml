@@ -94,10 +94,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf build/n64 wm_arcade_r7h1a.z64
+          rm -rf build/n64 wm_arcade_r7h2.z64
           make -j2
-          test -s wm_arcade_r7h1a.z64
-          ls -lh wm_arcade_r7h1a.z64
+          test -s wm_arcade_r7h2.z64
+          ls -lh wm_arcade_r7h2.z64
 
       - name: Publish ROM to rom-build branch
         shell: bash
@@ -105,9 +105,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          ROM="$GITHUB_WORKSPACE/wm_arcade_r7h1a.z64"
+          ROM="$GITHUB_WORKSPACE/wm_arcade_r7h2.z64"
           test -s "$ROM"
-          cp "$ROM" /tmp/wm_arcade_r7h1a.z64
+          cp "$ROM" /tmp/wm_arcade_r7h2.z64
 
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config user.name "github-actions[bot]"
@@ -116,13 +116,13 @@ jobs:
           # Use an orphan branch so the public ROM branch contains only build output.
           git checkout --orphan rom-build-tmp
           git rm -rf . >/dev/null 2>&1 || true
-          cp /tmp/wm_arcade_r7h1a.z64 ./wm_arcade_r7h1a.z64
+          cp /tmp/wm_arcade_r7h2.z64 ./wm_arcade_r7h2.z64
           {
-            echo "WrestleMania Arcade N64 r7h1a"
+            echo "WrestleMania Arcade N64 r7h2"
             echo "source_commit=$GITHUB_SHA"
             echo "workflow_run=$GITHUB_RUN_ID"
             echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } > BUILD.txt
-          git add -f wm_arcade_r7h1a.z64 BUILD.txt
+          git add -f wm_arcade_r7h2.z64 BUILD.txt
           git commit -m "ROM build ${GITHUB_SHA::12}"
           git push --force origin HEAD:rom-build
